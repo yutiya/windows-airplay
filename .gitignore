@@ -1,0 +1,19 @@
+# 依赖与运行时（用 npm install / scripts/prepare-runtime.ps1 复现）
+node_modules/
+runtime/
+dist/
+build/
+out/
+
+# 本地缓存与临时文件
+.cache/
+*.tmp
+*.swp
+
+# 运行日志与本机配置
+*.log
+settings.json
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db

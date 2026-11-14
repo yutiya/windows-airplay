@@ -1,0 +1,19 @@
+{
+  "name": "free-airplay-receiver",
+  "productName": "免费投屏",
+  "version": "0.0.1",
+  "description": "Windows 平台免费开源的 iPhone AirPlay 投屏接收端（Electron + UxPlay）",
+  "main": "src/main/index.js",
+  "license": "GPL-3.0-or-later",
+  "author": "免费投屏 contributors",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "check": "node scripts/check-env.js"
+  },
+  "dependencies": {
+    "koffi": "3.3.8"
+  },
+  "devDependencies": {
+    "electron": "45.3.2"
+  }
+}

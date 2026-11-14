@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>免费投屏 · AirPlay 接收端</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <div class="brand">
+      <span class="logo"></span>
+      <span class="brand-name">免费投屏</span>
+    </div>
+
+    <div id="status" class="status waiting">
+      <span class="dot"></span>
+      <span id="status-text">正在初始化…</span>
+    </div>
+
+    <div class="actions">
+      <button id="btn-start" class="primary" type="button">启动</button>
+      <button id="btn-restart" type="button" title="重启接收端">重启</button>
+      <button id="btn-reembed" type="button" title="首次连接黑屏时，重新嵌入视频窗口">重嵌画面</button>
+      <button id="btn-fullscreen" type="button" title="切换全屏（Esc 退出）">全屏</button>
+      <button id="btn-ontop" type="button" title="窗口置顶">置顶</button>
+      <button id="btn-toolbar" type="button" title="隐藏工具栏让画面占满；之后按 Alt+T 或右键托盘图标可恢复">隐藏栏</button>
+      <button id="btn-settings" type="button">设置</button>
+      <button id="btn-logs" type="button">日志</button>
+      <button id="btn-minimize" class="icon" type="button" title="最小化">—</button>
+    </div>
+  </header>
+
+  <main id="stage">
+    <div id="placeholder">
+      <div class="card">
+        <div id="ph-icon" class="ph-icon"></div>
+        <h1 id="ph-title">准备连接</h1>
+        <p id="ph-desc">把 iPhone 的画面和声音投到这台电脑。</p>
+
+        <ol id="steps" class="steps">
+          <li><b>1</b><span>让 iPhone 和电脑连到<b>同一个 Wi-Fi</b>，电脑网络设为「专用」</span></li>
+          <li><b>2</b><span>打开 iPhone 控制中心 → <b>屏幕镜像</b></span></li>
+          <li><b>3</b><span>在列表中选择 <b id="ph-name">免费投屏</b></span></li>
+        </ol>
+
+        <div id="ph-warn" class="warn hidden"></div>
+
+        <p class="tips">首次运行如弹出防火墙提示，请勾选「专用网络」并允许访问。<br>DRM 视频（Apple TV+、Netflix 等）受 Apple 限制无法镜像。</p>
+      </div>
+    </div>
+  </main>
+
+  <section id="settings" class="panel hidden" aria-label="设置">
+    <div class="panel-head">
+      <h2>设置</h2>
+      <button id="btn-settings-close" class="close" type="button">×</button>
+    </div>
+    <div class="panel-body">
+      <div class="field full">
+        <label for="uxplayPath">uxplay.exe 路径</label>
+        <div class="inline">
+          <input id="uxplayPath" type="text" placeholder="留空则自动探测 runtime/ 或 PATH">
+          <button id="btn-pick" type="button">浏览…</button>
+        </div>
+        <small>留空时自动探测 runtime/qt/ 与 runtime/bin/。自定义路径会覆盖下面的引擎选择。</small>
+      </div>
+
+      <div class="field full">
+        <label for="engineType">AirPlay 引擎</label>
+        <select id="engineType">
+          <option value="qt">Qt 便携版（推荐 · 兼容旧 CPU）</option>
+          <option value="cli">命令行版 uxplay.exe（需 AVX2 CPU）</option>
+        </select>
+        <small>命令行版是 UxPlay 1.72 原始二进制，用 -march=native 编译，需要 AVX2/BMI 指令集；旧 CPU 请选 Qt 便携版。</small>
+      </div>
+
+      <div class="field full">
+        <label for="embedMode">画面嵌入模式</label>
+        <select id="embedMode">
+          <option value="owned">覆盖模式（推荐 · 不换父窗口，首次连接不易黑屏）</option>
+          <option value="child">子窗口嵌入（SetParent）</option>
+          <option value="detached">独立窗口（完全不干预，用于排查）</option>
+        </select>
+        <small>首次投屏黑屏可换模式对比：若「独立窗口」第一次就有画面，说明是嵌入破坏了渲染。</small>
+      </div>
+
+      <div class="field">
+        <label for="serverName">接收端名称</label>
+        <input id="serverName" type="text" placeholder="免费投屏">
+        <small>iPhone「屏幕镜像」列表里显示的名字。</small>
+      </div>
+      <div class="field">
+        <label for="port">起始端口</label>
+        <input id="port" type="number" min="1024" max="65535" step="1">
+        <small>UxPlay 会占用该端口及随后两个 TCP/UDP 端口。</small>
+      </div>
+      <div class="field">
+        <label for="resolution">请求分辨率</label>
+        <select id="resolution">
+          <option value="1920x1080">1920 × 1080</option>
+          <option value="1280x720">1280 × 720（低延迟）</option>
+          <option value="2560x1440">2560 × 1440</option>
+          <option value="3840x2160">3840 × 2160（4K）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="videoSink">视频输出</label>
+        <select id="videoSink">
+          <option value="d3d11videosink">d3d11videosink（推荐）</option>
+          <option value="d3d12videosink">d3d12videosink</option>
+          <option value="autovideosink">autovideosink</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="audioSink">音频输出</label>
+        <select id="audioSink">
+          <option value="wasapisink">wasapisink（推荐）</option>
+          <option value="directsoundsink">directsoundsink（旧设备）</option>
+        </select>
+        <small>仅对命令行引擎生效；Qt 便携版使用自带音频输出。</small>
+      </div>
+      <div class="field">
+        <label for="toolbarHeight">工具栏高度（CSS 像素）</label>
+        <input id="toolbarHeight" type="number" min="0" max="160" step="1">
+        <small>画面位置错开时，可微调这个值。</small>
+      </div>
+      <div class="field">
+        <label for="dpiScale">DPI 缩放覆盖（0 = 自动）</label>
+        <input id="dpiScale" type="number" min="0" max="4" step="0.25">
+        <small>高分屏画面偏移时，试试 1 / 1.5 / 2。</small>
+      </div>
+      <div class="field">
+        <label for="embedDelayMs">画面嵌入延迟（毫秒）</label>
+        <input id="embedDelayMs" type="number" min="0" max="10000" step="100">
+        <small>首次连接黑屏时调大（如 2500）。窗口出现后等这么久才嵌入，避免打断 D3D11 首次渲染。</small>
+      </div>
+      <div class="field full">
+        <label for="extraArgs">额外启动参数</label>
+        <input id="extraArgs" type="text" placeholder="例如：-nh -fps 60">
+        <small>原样追加给 uxplay.exe，用空格分隔，可用引号包裹含空格的值。</small>
+      </div>
+
+      <div class="field full checks">
+        <label><input id="keepWindow" type="checkbox"> 断开后保留视频窗口（-nc，推荐）</label>
+        <label><input id="noHostnameSuffix" type="checkbox"> 名称不追加 @主机名（-nh）</label>
+        <label><input id="autoStart" type="checkbox"> 启动应用时自动运行接收端</label>
+        <label><input id="autoRestart" type="checkbox"> 引擎崩溃后自动重启</label>
+      </div>
+    </div>
+    <div class="panel-foot">
+      <span id="settings-hint">修改后建议重启接收端生效。</span>
+      <div>
+        <button id="btn-save" class="primary" type="button">保存并重启</button>
+        <button id="btn-save-only" type="button">仅保存</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="logs" class="panel hidden" aria-label="日志">
+    <div class="panel-head">
+      <h2>运行日志</h2>
+      <button id="btn-logs-close" class="close" type="button">×</button>
+    </div>
+    <pre id="log-view" class="log-view"></pre>
+    <div class="panel-foot">
+      <span>日志保存在内存中，最多 500 行。</span>
+      <div>
+        <button id="btn-open-log" type="button">打开日志文件</button>
+        <button id="btn-open-userdata" type="button">打开配置目录</button>
+        <button id="btn-clear-logs" type="button">清空显示</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
