@@ -46,6 +46,9 @@ npm start                     # 启动应用
 
 `npm start` 走 `scripts/start.js`：它会清理宿主环境可能遗留的 `ELECTRON_RUN_AS_NODE` / `NODE_OPTIONS`，避免在另一个 Electron 应用的终端里启动失败。
 
+> 若 `npm install` 后 Electron 二进制没下载下来（国内网络常见），补装一次：
+> `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electron/install.js`
+
 启动后在 iPhone 上：控制中心 → **屏幕镜像** → 选择接收端（默认「免费投屏」）。
 
 窗口顶部工具栏提供启动/停止、重启、重嵌画面、全屏、置顶、隐藏工具栏、设置、日志。点关闭会最小化到托盘，托盘菜单里可彻底退出。
@@ -69,7 +72,9 @@ npm start                     # 启动应用
 
 ## 运行时（runtime/）
 
-均**不纳入 git**（见 `.gitignore`），用 `scripts/prepare-runtime.ps1` 复现：
+**分支差异**：`full` 分支已把运行库一并纳入仓库，检出后只需 `npm install && npm start` 即可运行，无需执行准备脚本；精简分支 `main` 不含运行库，用 `scripts/prepare-runtime.ps1` 复现。两个分支都**不包含 `node_modules/`**，依赖一律由 `npm install` 生成。
+
+目录结构：
 
 ```
 runtime/qt/                    默认引擎，约 255 MB
