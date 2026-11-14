@@ -1,6 +1,9 @@
 # 统一文本换行，避免 Windows 检出时产生 CRLF 噪音
 * text=auto eol=lf
 
-# 二进制资源
+# 二进制资源与运行库
 *.png binary
 *.ico binary
+*.dll binary
+*.exe binary
+*.pyd binary

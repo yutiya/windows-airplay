@@ -1,9 +1,10 @@
-# 依赖与运行时（用 npm install / scripts/prepare-runtime.ps1 复现）
+# node 依赖始终由 npm install 生成，不入库
 node_modules/
-runtime/
 dist/
 build/
 out/
+
+# 本分支（full）内置 runtime/ 运行库；精简分支 main 才用 prepare-runtime.ps1 复现
 
 # 本地缓存与临时文件
 .cache/
