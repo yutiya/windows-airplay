@@ -8,7 +8,8 @@
   "author": "免费投屏 contributors",
   "scripts": {
     "start": "node scripts/start.js",
-    "check": "node scripts/check-env.js"
+    "check": "node scripts/check-env.js",
+    "test:firstcast": "node scripts/test-firstcast.js"
   },
   "dependencies": {
     "koffi": "3.3.8"

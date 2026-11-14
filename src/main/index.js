@@ -4,6 +4,8 @@ const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, screen, sh
 const path = require('node:path');
 const fs = require('node:fs');
 const config = require('./config');
+const geometry = require('./geometry');
+const embedguard = require('./embedguard');
 const { UxPlayEngine, resolveExecutable } = require('./uxplay');
 const winembed = require('./winembed');
 
@@ -15,12 +17,16 @@ let embedded = null;
 let quitting = false;
 let panelOpen = false;
 let cfg = null;
-let pipelineReadyAt = 0;
 let nudgeTimers = [];
+let sourceAspect = 0;   // 视频源宽高比，发现窗口时记录，用于居中留边
+let lastWindowBg = '';
 
 const ICON_FILE = path.join(__dirname, '..', '..', 'assets', 'tray.png');
 const RENDERER = path.join(__dirname, '..', 'renderer', 'index.html');
 const PRELOAD = path.join(__dirname, '..', 'preload', 'index.js');
+const IDLE_BG = '#0b0e13';
+const STAGE_PADDING = 10;   // CSS 像素：画面四周留出的背景色取景框
+const VERIFY_INTERVAL = 200;
 
 function logFilePath() {
   return path.join(app.getPath('userData'), 'engine.log');
@@ -32,18 +38,13 @@ function persistLog(line) {
   } catch (_) { /* 日志写入失败不影响运行 */ }
 }
 
-// 覆盖模式用：把 Electron 客户区换算成屏幕物理像素坐标
-function videoScreenRect() {
-  if (!win || win.isDestroyed()) return null;
-  const bounds = win.getContentBounds();
-  const factor = scaleFactor();
-  const top = cfg.hideToolbar ? 0 : Math.round(Number(cfg.toolbarHeight) * factor);
-  return {
-    x: Math.round(bounds.x * factor),
-    y: Math.round(bounds.y * factor) + top,
-    width: Math.max(1, Math.round(bounds.width * factor)),
-    height: Math.max(1, Math.round(bounds.height * factor) - top)
-  };
+function validColor(value) {
+  const text = String(value || '').trim();
+  return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toLowerCase() : '#000000';
+}
+
+function streamBg() {
+  return validColor(cfg && cfg.streamBgColor);
 }
 
 function parentHwnd() {
@@ -66,8 +67,12 @@ function scaleFactor() {
   }
 }
 
+function paddingPx() {
+  return Math.round(STAGE_PADDING * scaleFactor());
+}
+
 // native 子窗口坐标是父窗口客户区的物理像素，而 getContentSize() 给的是 DIP
-function videoRect() {
+function stageClientRect() {
   if (!win || win.isDestroyed()) return null;
   const [width, height] = win.getContentSize();
   const factor = scaleFactor();
@@ -80,14 +85,36 @@ function videoRect() {
   };
 }
 
+function videoRect() {
+  const stage = stageClientRect();
+  return stage ? geometry.fitRect(stage, sourceAspect, paddingPx()) : null;
+}
+
+// 覆盖模式用：把 Electron 客户区换算成屏幕物理像素坐标
+function videoScreenRect() {
+  if (!win || win.isDestroyed()) return null;
+  const bounds = win.getContentBounds();
+  const factor = scaleFactor();
+  const top = cfg.hideToolbar ? 0 : Math.round(Number(cfg.toolbarHeight) * factor);
+  const stage = {
+    x: Math.round(bounds.x * factor),
+    y: Math.round(bounds.y * factor) + top,
+    width: Math.max(1, Math.round(bounds.width * factor)),
+    height: Math.max(1, Math.round(bounds.height * factor) - top)
+  };
+  return geometry.fitRect(stage, sourceAspect, paddingPx());
+}
+
+function currentRect() {
+  return embedded && embedded.mode === 'owned' ? videoScreenRect() : videoRect();
+}
+
 function syncVideoRect() {
-  if (!embedded || !embedded.hwnd) return;
+  // 面板打开时视频窗口被刻意隐藏，别因为 resize 又把它显示出来
+  if (panelOpen || !embedded || !embedded.hwnd) return;
   try {
-    if (embedded.mode === 'owned') {
-      winembed.repositionOwned(embedded.hwnd, videoScreenRect());
-    } else if (embedded.mode === 'child') {
-      winembed.move(embedded.hwnd, videoRect());
-    }
+    if (embedded.mode === 'owned') winembed.repositionOwned(embedded.hwnd, videoScreenRect(), false);
+    else if (embedded.mode === 'child') winembed.move(embedded.hwnd, videoRect());
   } catch (_) { /* 窗口可能已销毁 */ }
 }
 
@@ -119,46 +146,53 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+function applyWindowBackground(state) {
+  if (!win || win.isDestroyed()) return;
+  const color = state === 'streaming' ? streamBg() : IDLE_BG;
+  if (color === lastWindowBg) return;
+  lastWindowBg = color;
+  try { win.setBackgroundColor(color); } catch (_) { /* 老版本 Electron 忽略 */ }
+}
+
 function clearNudgeTimers() {
   for (const timer of nudgeTimers) clearTimeout(timer);
   nudgeTimers = [];
 }
 
 // 管线开始推流 / 首次嵌入完成后，温和校正窗口：只重发几何并请求重绘，
-// 不换父窗口，避免打断 D3D11 的 swapchain。
+// 不换父窗口，避免打断 D3D 的 swapchain。
+// 注意：管线信号常早于窗口出现，所以这里即使还没嵌入也先把定时器排上。
 function scheduleNudges(reason) {
   clearNudgeTimers();
-  if (!embedded || !embedded.hwnd) return;
   engine.emit('log', `[画面] ${reason}，正在校正视频窗口`);
   for (const delay of [250, 900, 2000]) {
     nudgeTimers.push(setTimeout(() => {
-      if (!quitting && embedded && embedded.hwnd) {
-        try {
-          if (embedded.mode === 'owned') winembed.repositionOwned(embedded.hwnd, videoScreenRect());
-          else if (embedded.mode === 'child') winembed.nudge(embedded.hwnd, videoRect());
-        } catch (_) { /* 窗口已销毁 */ }
-      }
+      if (quitting || !embedded || !embedded.hwnd || panelOpen) return;
+      try {
+        if (embedded.mode === 'child') winembed.nudge(embedded.hwnd, videoRect());
+        else if (embedded.mode === 'owned') winembed.repositionOwned(embedded.hwnd, videoScreenRect(), false);
+      } catch (_) { /* 窗口已销毁 */ }
     }, delay));
   }
 }
 
-// 手动「重新嵌入」：彻底 detach 再 SetParent，用于自动校正仍无效时兜底
-function reembed(force) {
-  if (!engine.running || !engine.pid) {
-    engine.emit('log', '[画面] 接收端未运行，无法重新嵌入');
-    return false;
-  }
-  if (embedded && embedded.hwnd) {
-    try {
-      if (embedded.mode === 'owned') winembed.detachOwned(embedded.hwnd, embedded.originalStyle);
-      else if (embedded.mode === 'child') winembed.detach(embedded.hwnd, embedded.originalStyle);
-    } catch (_) { /* 已销毁 */ }
-  }
-  embedded = null;
-  clearNudgeTimers();
-  engine.emit('log', '[画面] 手动重新嵌入视频窗口');
-  startWatching(engine.pid, force);
-  return true;
+// 每次轮询都做的连续校验：这是「第一次投屏就有画面」的核心保障。
+// 引擎可能不主动显示隐藏窗口、可能重建父子关系、可能把窗口挪回原始尺寸，
+// 这里逐项确认并就地修复，不需要用户断开重连第二次。
+function verifyEmbedded(rec) {
+  return embedguard.verifyEmbedded({
+    quitting,
+    panelOpen,
+    streaming: Boolean(engine && engine.state === 'streaming'),
+    embedded,
+    hwnd: rec.hwnd,
+    parentHwnd: parentHwnd(),
+    currentRect,
+    aspect: sourceAspect,
+    winembed,
+    log: (line) => engine.emit('log', line),
+    onAspectChanged: (ratio) => { sourceAspect = ratio; }
+  });
 }
 
 function stopWatching() {
@@ -170,18 +204,16 @@ function stopWatching() {
   embedded = null;
 }
 
-function startWatching(pid, forceImmediate) {
+function startWatching(pid) {
+  if (!pid) return;
   stopWatching();
-  const mode = cfg.embedMode || 'owned';
-  const settle = Math.max(0, Number(cfg.embedDelayMs) || 1500);
-  const delay = forceImmediate ? 250 : settle;
-  pipelineReadyAt = 0;
-  engine.emit('log', `[画面] 嵌入模式 = ${mode}，稳定期 ${delay}ms`);
+  const mode = cfg.embedMode || 'child';
+  const grace = Math.max(0, Math.min(5000, Number(cfg.embedDelayMs) || 0));
+  engine.emit('log', `[画面] 嵌入模式 = ${mode}${mode === 'child' ? '（当前窗口内显示）' : ''}，首帧保护 ${grace}ms`);
   stopWatch = winembed.watch(pid, {
-    interval: 400,
-    settleMs: delay,
-    // 收到 "Begin streaming to GStreamer video pipeline" 后提前放行
-    shouldEmbed: () => pipelineReadyAt > 0 && Date.now() - pipelineReadyAt < 12000,
+    interval: VERIFY_INTERVAL,
+    settleMs: 0,               // 窗口一出现就嵌入，不给它变成独立窗口的机会
+    verify: verifyEmbedded,
     release: (hwnd, previous) => {
       if (mode === 'owned') winembed.detachOwned(hwnd, previous);
       else if (mode === 'child') winembed.detach(hwnd, previous);
@@ -190,29 +222,41 @@ function startWatching(pid, forceImmediate) {
       if (waited === 0) {
         const list = (all || []).map((w) => `${w.hwnd}/${w.cls}/${w.width}x${w.height}/vis=${w.visible}/"${w.title}"`).join(', ');
         engine.emit('log', `[画面] 候选窗口 ${(all || []).length} 个：${list}`);
-        engine.emit('log', `[画面] 选中 hwnd=${found.hwnd} class=${found.cls} ${found.width}x${found.height} visible=${found.visible}，等待 ${delay}ms`);
+        engine.emit('log', `[画面] 选中 hwnd=${found.hwnd} class=${found.cls} ${found.width}x${found.height} visible=${found.visible}，立即嵌入当前窗口`);
       }
     },
-    onFound: (found, waited, forced) => {
+    onFound: (found, waited) => {
       const parent = parentHwnd();
       if (!parent) return null;
+      sourceAspect = geometry.aspectOf(found) || sourceAspect;
       try {
         let previous = 0;
-        if (mode === 'owned') {
-          // 不换父窗口，只建立 owner 关系 + 按屏幕坐标定位
+        if (mode === 'child') {
+          // 先只建立父子关系、保持隐藏；显示交给引擎或首帧保护
+          previous = winembed.embed(found.hwnd, parent, videoRect(), { show: false });
+          if (winembed.getParent(found.hwnd) !== parent) {
+            winembed.embed(found.hwnd, parent, videoRect(), { show: false });
+          }
+          if (winembed.getParent(found.hwnd) !== parent) {
+            engine.emit('log', '[错误] SetParent 未生效，下一轮重试');
+            return null;
+          }
+        } else if (mode === 'owned') {
           previous = winembed.attachAsOwned(found.hwnd, parent, videoScreenRect());
-        } else if (mode === 'child') {
-          previous = winembed.embed(found.hwnd, parent, videoRect());
         } else {
-          // 独立窗口模式：Qt 引擎创建的窗口是隐藏的，主动显示才能看到画面
           winembed.show(found.hwnd, true);
         }
-        embedded = { hwnd: found.hwnd, originalStyle: previous, mode };
-        engine.emit('log', `[画面] 已${mode === 'detached' ? '发现（独立窗口，未干预）' : '嵌入'}（等待 ${waited}ms${forced ? '，管线信号提前放行' : ''}）`);
+        embedded = {
+          hwnd: found.hwnd,
+          originalStyle: previous,
+          mode,
+          showAfter: Date.now() + (mode === 'child' ? grace : 0)
+        };
+        engine.emit('log', `[画面] 已${mode === 'detached' ? '发现（独立窗口）' : '嵌入当前窗口'}（${waited}ms，源 ${found.width}x${found.height}，宽高比 ${sourceAspect.toFixed(3)}）`);
         if (panelOpen && mode !== 'detached') winembed.show(found.hwnd, false);
         engine.setState('streaming');
         broadcast();
-        scheduleNudges(mode === 'detached' ? '窗口出现' : '首次嵌入完成');
+        scheduleNudges('首次嵌入完成');
         return previous;
       } catch (err) {
         engine.emit('log', `[错误] 嵌入视频窗口失败：${err.message}`);
@@ -227,9 +271,20 @@ function startWatching(pid, forceImmediate) {
   });
 }
 
+// 手动「重新嵌入」：彻底 detach 再挂一次 watcher，用于自动校正仍无效时兜底
+function reembed() {
+  if (!engine.running || !engine.pid) {
+    engine.emit('log', '[画面] 接收端未运行，无法重新嵌入');
+    return false;
+  }
+  engine.emit('log', '[画面] 手动重新嵌入视频窗口');
+  startWatching(engine.pid);
+  return true;
+}
+
 function startEngine() {
   const result = engine.start(cfg);
-  if (result.ok && !result.already && engine.pid) startWatching(engine.pid);
+  // 正常启动 / 自动重启都会由 engine 的 'started' 事件挂上 watcher
   broadcast();
   return result;
 }
@@ -264,17 +319,26 @@ function toggleToolbar() {
 
 function wireEngine() {
   engine.on('log', (line) => { persistLog(line); send('log', line); });
-  engine.on('state', () => broadcast());
+  engine.on('state', (state) => {
+    applyWindowBackground(state);
+    // 断开后隐藏画面，让占位提示重新可见；重新投屏时由连续校验负责显示回来
+    if (embedded && embedded.hwnd && state !== 'streaming') {
+      try { winembed.show(embedded.hwnd, false); } catch (_) { /* 窗口可能已销毁 */ }
+    }
+    broadcast();
+  });
+  engine.on('started', ({ pid }) => { if (!quitting) startWatching(pid); });
   engine.on('problem', (line) => send('notice', line));
   engine.on('pipeline-ready', () => {
-    // 首次连接时 GStreamer 才真正开始推流，此刻修正嵌入/重绘最合适
-    pipelineReadyAt = Date.now();
     engine.emit('log', '[画面] 检测到 GStreamer 视频管线开始推流');
+    if (engine.running && embedded && engine.state !== 'streaming') engine.setState('streaming');
     scheduleNudges('视频管线开始推流');
   });
   engine.on('client-hint', (kind) => {
     if (kind === 'disconnected' && engine.running && engine.state === 'streaming') {
       engine.setState('waiting');
+    } else if (kind === 'connected' && engine.running && embedded && engine.state !== 'streaming') {
+      engine.setState('streaming');
     }
     broadcast();
   });
@@ -290,7 +354,7 @@ function createWindow() {
     height: 760,
     minWidth: 760,
     minHeight: 480,
-    backgroundColor: '#0b0e13',
+    backgroundColor: IDLE_BG,
     title: '免费投屏 · AirPlay 接收端',
     webPreferences: {
       preload: PRELOAD,
@@ -301,6 +365,7 @@ function createWindow() {
   });
   win.setMenu(null);
   win.loadFile(RENDERER);
+  lastWindowBg = IDLE_BG;
 
   // 主进程层拦截快捷键：工具栏隐藏、渲染层按钮不可见时依然有效
   win.webContents.on('before-input-event', (event, input) => {
@@ -332,7 +397,7 @@ function refreshTray() {
     { type: 'separator' },
     { label: engine.running ? '重启接收端' : '启动接收端', click: () => restartEngine() },
     { label: '停止接收端', enabled: engine.running, click: () => stopEngine() },
-    { label: '重新嵌入画面（黑屏时用）', click: () => reembed(true) },
+    { label: '重新嵌入画面（黑屏时用）', click: () => reembed() },
     { label: cfg.hideToolbar ? '显示工具栏' : '隐藏工具栏', click: () => toggleToolbar() },
     { type: 'separator' },
     {
@@ -367,7 +432,7 @@ function registerIpc() {
   ipcMain.handle('app:start', () => startEngine());
   ipcMain.handle('app:stop', () => { stopEngine(); return true; });
   ipcMain.handle('app:restart', () => { restartEngine(); return true; });
-  ipcMain.handle('app:reembed', () => reembed(true));
+  ipcMain.handle('app:reembed', () => reembed());
 
   ipcMain.handle('app:settings', (_event, patch) => {
     cfg = config.save(patch || {});
@@ -375,9 +440,11 @@ function registerIpc() {
       win.setAlwaysOnTop(Boolean(patch.alwaysOnTop), 'floating');
     }
     syncVideoRect();
+    lastWindowBg = '';
+    applyWindowBackground(engine.state);
     // 切换嵌入模式后立即用新模式重新处理窗口，无需重启引擎
     if (Object.prototype.hasOwnProperty.call(patch || {}, 'embedMode') && engine.running && engine.pid) {
-      setTimeout(() => reembed(true), 60);
+      setTimeout(() => reembed(), 60);
     }
     broadcast();
     refreshTray();

@@ -196,6 +196,10 @@ class UxPlayEngine extends EventEmitter {
       return { ok: false, error: this.lastError };
     }
 
+    // 无论首次启动、手动重启还是崩溃后自动重启，都通知主进程重新挂窗口监视器。
+    // 否则引擎换 PID 后旧 watcher 还盯着旧进程，投屏画面就再也不会被嵌入。
+    this.emit('started', { pid: this.child.pid, kind, exe });
+
     const child = this.child;
     this._pipe(child.stdout);
     this._pipe(child.stderr);

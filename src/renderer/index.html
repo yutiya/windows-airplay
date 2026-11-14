@@ -76,13 +76,13 @@
       </div>
 
       <div class="field full">
-        <label for="embedMode">画面嵌入模式</label>
+        <label for="embedMode">画面显示方式</label>
         <select id="embedMode">
-          <option value="owned">覆盖模式（推荐 · 不换父窗口，首次连接不易黑屏）</option>
-          <option value="child">子窗口嵌入（SetParent）</option>
-          <option value="detached">独立窗口（完全不干预，用于排查）</option>
+          <option value="child">当前窗口内显示（推荐 · 不再另开窗口）</option>
+          <option value="owned">覆盖模式（排查用 · 画面仍是独立顶层窗口）</option>
+          <option value="detached">独立窗口（排查用 · 完全不干预）</option>
         </select>
-        <small>首次投屏黑屏可换模式对比：若「独立窗口」第一次就有画面，说明是嵌入破坏了渲染。</small>
+        <small>默认把视频窗口变成主窗口的子窗口，画面直接显示在当前窗口里，不会弹出新窗口。</small>
       </div>
 
       <div class="field">
@@ -131,9 +131,14 @@
         <small>高分屏画面偏移时，试试 1 / 1.5 / 2。</small>
       </div>
       <div class="field">
-        <label for="embedDelayMs">画面嵌入延迟（毫秒）</label>
-        <input id="embedDelayMs" type="number" min="0" max="10000" step="100">
-        <small>首次连接黑屏时调大（如 2500）。窗口出现后等这么久才嵌入，避免打断 D3D11 首次渲染。</small>
+        <label for="embedDelayMs">首次投屏显示保护（毫秒）</label>
+        <input id="embedDelayMs" type="number" min="0" max="5000" step="100">
+        <small>窗口出现后留给引擎自行显示的时间；到点仍隐藏就主动显示并重绘，保证第一次投屏就有画面。</small>
+      </div>
+      <div class="field">
+        <label for="streamBgColor">投屏时画面背景色</label>
+        <input id="streamBgColor" type="color">
+        <small>投屏中舞台切换成这个颜色，画面按原始比例居中、四周留边，形成取景框突出共享内容。</small>
       </div>
       <div class="field full">
         <label for="extraArgs">额外启动参数</label>

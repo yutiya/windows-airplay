@@ -36,6 +36,7 @@ function win32() {
     GetWindowThreadProcessId: user32.func('uint32 __stdcall GetWindowThreadProcessId(uintptr_t hwnd, void *pid)'),
     IsWindowVisible: user32.func('bool __stdcall IsWindowVisible(uintptr_t hwnd)'),
     IsWindow: user32.func('bool __stdcall IsWindow(uintptr_t hwnd)'),
+    GetParent: user32.func('uintptr_t __stdcall GetParent(uintptr_t hwnd)'),
     GetWindowRect: user32.func('bool __stdcall GetWindowRect(uintptr_t hwnd, void *rect)'),
     GetClassNameW: user32.func('int32 __stdcall GetClassNameW(uintptr_t hwnd, void *buf, int32 max)'),
     GetWindowTextW: user32.func('int32 __stdcall GetWindowTextW(uintptr_t hwnd, void *buf, int32 max)'),
@@ -65,9 +66,9 @@ function windowTitle(hwnd) {
 }
 
 // 枚举属于指定进程的顶层窗口。
-// 不能按 IsWindowVisible 过滤：Qt 引擎的 D3D12 视频窗口
-// （GstD3D12Hwnd / "AirPlay Video Stream"）创建后是隐藏的，等首帧才显示，
-// 过滤掉就永远找不到，嵌入逻辑一次都不会执行。
+// 不能按 IsWindowVisible 过滤：Qt 引擎的视频窗口（GstD3D12Hwnd /
+// "AirPlay Video Stream"）创建后是隐藏的，过滤掉就永远找不到 —— 这正是
+// v0.0.1 之前「第一次投屏没画面、第二次才有」的根因，务必保留。
 function windowsOfPid(pid) {
   const w = win32();
   const out = [];
@@ -131,29 +132,37 @@ function pickVideoWindow(pid) {
 }
 
 // SetWindowPos 带 SWP_FRAMECHANGED 才能让 WS_CHILD 变更真正生效并触发 WM_SIZE，
-// D3D11 videosink 依赖这一步重建 swapchain。
-function place(hwnd, rect, frameChanged) {
+// D3D videosink 依赖这一步重建 swapchain。
+// show=false 用于「只保持几何、不把面板打开时被隐藏的窗口重新显示出来」。
+function place(hwnd, rect, frameChanged, show = false) {
   const w = win32();
-  if (!w.IsWindow(hwnd)) return false;
+  if (!w.IsWindow(hwnd) || !rect) return false;
   const x = Math.round(rect.x || 0);
   const y = Math.round(rect.y || 0);
   const width = Math.max(1, Math.round(rect.width));
   const height = Math.max(1, Math.round(rect.height));
-  const flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW | (frameChanged ? SWP_FRAMECHANGED : 0);
+  const flags = SWP_NOZORDER | SWP_NOACTIVATE
+    | (show ? SWP_SHOWWINDOW : 0)
+    | (frameChanged ? SWP_FRAMECHANGED : 0);
   return Boolean(w.SetWindowPos(hwnd, 0, x, y, width, height, flags >>> 0));
 }
 
-function embed(childHwnd, parentHwnd, rect) {
+// dev：默认 show=false —— 先把隐藏的视频窗口变成当前窗口的子窗口，
+// 让引擎在首帧时自行显示；若它不显示，由主进程的「首帧保护」主动显示并重绘。
+// 这样第一次投屏就不会再冒出一个独立窗口，也不会因为过早 ShowWindow 打断渲染。
+function embed(childHwnd, parentHwnd, rect, options = {}) {
+  const show = options.show !== false;
   const w = win32();
   const originalStyle = Number(w.GetWindowLongPtrW(childHwnd, GWL_STYLE)) >>> 0;
   // 顺序很重要：先 SetParent，再改样式。窗口还是顶层时把 WS_POPUP 改成 WS_CHILD
-  // 会触发窗口重建，打断首次 D3D11 渲染初始化（表现为第一次连接黑屏）。
+  // 会触发窗口重建，打断首次渲染初始化。
   w.SetParent(childHwnd, parentHwnd);
-  const style = (originalStyle | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN)
+  let style = (originalStyle | WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN)
     & ~WS_POPUP & ~WS_CAPTION & ~WS_THICKFRAME & ~WS_SYSMENU & ~WS_MINIMIZEBOX & ~WS_MAXIMIZEBOX;
+  style = show ? (style | WS_VISIBLE) : (style & ~WS_VISIBLE);
   w.SetWindowLongPtrW(childHwnd, GWL_STYLE, style >>> 0);
-  w.ShowWindow(childHwnd, SW_SHOW);
-  place(childHwnd, rect, true);
+  w.ShowWindow(childHwnd, show ? SW_SHOW : SW_HIDE);
+  place(childHwnd, rect, true, show);
   return originalStyle;
 }
 
@@ -163,12 +172,15 @@ function detach(childHwnd, originalStyle) {
   w.SetParent(childHwnd, 0);
   if (originalStyle !== undefined && originalStyle !== null) {
     w.SetWindowLongPtrW(childHwnd, GWL_STYLE, originalStyle >>> 0);
+    // 原本就是隐藏的窗口（Qt 引擎的视频窗口）不要在这里被意外显示成独立窗口
+    w.ShowWindow(childHwnd, (originalStyle & WS_VISIBLE) ? SW_SHOW : SW_HIDE);
+  } else {
+    w.ShowWindow(childHwnd, SW_HIDE);
   }
-  w.ShowWindow(childHwnd, SW_SHOW);
 }
 
 function move(hwnd, rect) {
-  return place(hwnd, rect, false);
+  return place(hwnd, rect, false, false);
 }
 
 // 温和校正：不换父窗口，只重新下发几何 + 让客户区重绘，
@@ -176,13 +188,14 @@ function move(hwnd, rect) {
 function nudge(hwnd, rect) {
   const w = win32();
   if (!w.IsWindow(hwnd)) return false;
-  place(hwnd, rect, true);
+  // 只触发 WM_SIZE / 重绘，不夹带 SWP_SHOWWINDOW：
+  // 首帧保护期内窗口可能仍应处于隐藏状态，显示与否由主进程决定。
+  place(hwnd, rect, true, false);
   try { w.InvalidateRect(hwnd, null, true); } catch (_) { /* 某些窗口不接受 */ }
   return true;
 }
 
-// 覆盖模式：不 SetParent、不改 WS_CHILD，视频窗口仍是顶层 WS_POPUP，
-// D3D11 swapchain 不会因父子关系变化而失效。
+// 覆盖模式：不 SetParent、不改 WS_CHILD，视频窗口仍是顶层 WS_POPUP。
 // GWLP_HWNDPARENT 只是建立 owner 关系：窗口始终在 Electron 上方、随之最小化。
 function attachAsOwned(hwnd, ownerHwnd, screenRect) {
   const w = win32();
@@ -190,18 +203,18 @@ function attachAsOwned(hwnd, ownerHwnd, screenRect) {
   const previousOwner = Number(w.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)) >>> 0;
   w.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, ownerHwnd);
   w.ShowWindow(hwnd, SW_SHOW);
-  repositionOwned(hwnd, screenRect);
+  repositionOwned(hwnd, screenRect, true);
   return previousOwner;
 }
 
-function repositionOwned(hwnd, screenRect) {
+function repositionOwned(hwnd, screenRect, show = true) {
   const w = win32();
   if (!w.IsWindow(hwnd) || !screenRect) return false;
   const x = Math.round(screenRect.x || 0);
   const y = Math.round(screenRect.y || 0);
   const width = Math.max(1, Math.round(screenRect.width));
   const height = Math.max(1, Math.round(screenRect.height));
-  const flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+  const flags = SWP_NOZORDER | SWP_NOACTIVATE | (show ? SWP_SHOWWINDOW : 0);
   return Boolean(w.SetWindowPos(hwnd, 0, x, y, width, height, flags >>> 0));
 }
 
@@ -215,6 +228,42 @@ function exists(hwnd) {
   return Boolean(hwnd) && Boolean(win32().IsWindow(hwnd));
 }
 
+function isVisible(hwnd) {
+  return Boolean(hwnd) && Boolean(win32().IsWindowVisible(hwnd));
+}
+
+function getParent(hwnd) {
+  if (!hwnd) return 0;
+  return Number(win32().GetParent(hwnd)) || 0;
+}
+
+function windowRect(hwnd) {
+  const w = win32();
+  if (!w.IsWindow(hwnd)) return null;
+  const rect = Buffer.alloc(16);
+  if (!w.GetWindowRect(hwnd, rect)) return null;
+  return {
+    x: rect.readInt32LE(0),
+    y: rect.readInt32LE(4),
+    width: rect.readInt32LE(8) - rect.readInt32LE(0),
+    height: rect.readInt32LE(12) - rect.readInt32LE(4)
+  };
+}
+
+// 只重发几何、不显示窗口、不改样式、不触发 WM_SIZE：
+// 引擎可能自己把窗口挪回原始位置/尺寸，用它在投屏期间持续把画面按回取景框。
+function keepPosition(hwnd, rect) {
+  const w = win32();
+  if (!w.IsWindow(hwnd) || !rect) return false;
+  const flags = SWP_NOZORDER | SWP_NOACTIVATE;
+  return Boolean(w.SetWindowPos(
+    hwnd, 0,
+    Math.round(rect.x || 0), Math.round(rect.y || 0),
+    Math.max(1, Math.round(rect.width)), Math.max(1, Math.round(rect.height)),
+    flags >>> 0
+  ));
+}
+
 // 打开设置/日志面板时临时隐藏视频窗口，否则 native 子窗口会盖住 HTML 界面
 function show(hwnd, visible) {
   const w = win32();
@@ -222,14 +271,17 @@ function show(hwnd, visible) {
   return Boolean(w.ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE));
 }
 
-// 轮询等待视频窗口出现，并在「窗口稳定」后才嵌入。
-// settleMs：窗口首次出现且尺寸不再变化后需要等待的时间。
-// shouldEmbed：外部信号（例如 "Begin streaming to GStreamer video pipeline"）可提前放行。
+// 轮询等待视频窗口出现。dev 分支默认 settleMs=0：窗口一出现（哪怕还是隐藏的）
+// 就立刻嵌入当前窗口，不再等稳定期，也不给引擎弹出独立窗口的机会。
+// enumerate / isAlive / verify 可注入，便于写不依赖真机的回归测试。
 function watch(pid, {
-  interval = 400,
-  settleMs = 1500,
+  interval = 200,
+  settleMs = 0,
   maxWaitMs = 8000,
   shouldEmbed = null,
+  enumerate = candidateWindows,
+  isAlive = exists,
+  verify = null,
   onCandidate = null,
   release = detach,
   onFound,
@@ -243,11 +295,16 @@ function watch(pid, {
   const timer = setInterval(() => {
     if (stopped) return;
     if (current) {
-      if (!exists(current.hwnd)) {
+      if (!isAlive(current.hwnd)) {
         const lost = current;
         current = null;
         originalStyle = null;
+        candidate = null;
         if (onLost) onLost(lost);
+        return;
+      }
+      if (typeof verify === 'function') {
+        try { verify(current); } catch (_) { /* 校验异常不打断主流程 */ }
       }
       return;
     }
@@ -255,7 +312,7 @@ function watch(pid, {
     let found = null;
     let all = [];
     try {
-      all = candidateWindows(pid);
+      all = enumerate(pid);
       found = all[0] || null;
     } catch (_) {
       return; // 枚举失败不应打断主流程，下一轮再试
@@ -271,13 +328,14 @@ function watch(pid, {
       || Math.abs(candidate.height - found.height) > 8;
     if (changed) {
       candidate = { hwnd: found.hwnd, since: Date.now(), width: found.width, height: found.height };
-      if (onCandidate) onCandidate(found, 0);
-      return;
+      if (onCandidate) onCandidate(found, 0, all);
+      // settleMs=0 表示立即嵌入，不再多等一轮
+      if (settleMs > 0) return;
     }
 
     const waited = Date.now() - candidate.since;
     const forced = typeof shouldEmbed === 'function' && shouldEmbed();
-    if (waited < settleMs && !forced && waited < maxWaitMs) {
+    if (settleMs > 0 && waited < settleMs && !forced && waited < maxWaitMs) {
       if (onCandidate) onCandidate(found, waited, all);
       return;
     }
@@ -303,5 +361,6 @@ function watch(pid, {
 
 module.exports = {
   windowsOfPid, candidateWindows, pickVideoWindow, embed, detach, move, nudge, show, exists, watch,
-  attachAsOwned, repositionOwned, detachOwned
+  attachAsOwned, repositionOwned, detachOwned,
+  isVisible, getParent, windowRect, keepPosition
 };

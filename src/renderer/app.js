@@ -16,7 +16,7 @@ const STATUS = {
 
 const FIELDS = [
   'uxplayPath', 'engineType', 'embedMode', 'serverName', 'port', 'resolution', 'videoSink',
-  'audioSink', 'toolbarHeight', 'dpiScale', 'embedDelayMs', 'extraArgs'
+  'audioSink', 'toolbarHeight', 'dpiScale', 'embedDelayMs', 'streamBgColor', 'extraArgs'
 ];
 const CHECKS = ['keepWindow', 'noHostnameSuffix', 'autoStart', 'autoRestart'];
 
@@ -98,7 +98,11 @@ function render(s) {
   $('#btn-toolbar').textContent = cfg.hideToolbar ? '显示栏' : '隐藏栏';
 
   document.documentElement.style.setProperty('--toolbar-h', String(cfg.toolbarHeight || 0) + 'px');
+  const bg = /^#[0-9a-fA-F]{6}$/.test(String(cfg.streamBgColor || '')) ? cfg.streamBgColor : '#000000';
+  document.documentElement.style.setProperty('--stream-bg', bg);
   document.body.classList.toggle('no-toolbar', Boolean(cfg.hideToolbar));
+  // 投屏中切换舞台背景色，给共享画面做取景框
+  document.body.classList.toggle('streaming', engine.state === 'streaming');
 
   if (engine.state === 'streaming') {
     $('#placeholder').classList.add('hidden');
@@ -133,7 +137,9 @@ function collectSettings() {
   patch.port = Number(patch.port) || 7000;
   patch.toolbarHeight = Number(patch.toolbarHeight) || 0;
   patch.dpiScale = Number(patch.dpiScale) || 0;
-  patch.embedDelayMs = Number(patch.embedDelayMs) || 1500;
+  // 0 是合法值（不给引擎留等待时间），不能用 || 回落
+  const delay = Number(patch.embedDelayMs);
+  patch.embedDelayMs = Number.isFinite(delay) ? delay : 600;
   for (const id of CHECKS) patch[id] = $('#' + id).checked;
   return patch;
 }

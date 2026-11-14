@@ -40,6 +40,7 @@ Electron 只负责界面与进程编排，**完全不参与解码**，因此绕�
 ```bash
 npm install
 npm run check                 # 环境自检（只读）
+npm run test:firstcast        # 首次投屏回归测试（窗口层，无需 iPhone）
 node scripts/smoke-test.js    # 启动引擎 9 秒，验证存活 + mDNS 服务注册
 npm start                     # 启动应用
 ```
@@ -53,6 +54,14 @@ npm start                     # 启动应用
 **隐藏工具栏后怎么恢复**：按 `Alt+T`，或右键托盘图标选「显示工具栏」（该菜单项会随状态变成「隐藏工具栏」）。隐藏时会弹出提示，应用启动时若仍处于隐藏状态也会再次提示。这个快捷键在主进程层拦截，工具栏不可见时依然有效。
 
 > 打开「设置」或「日志」面板时，程序会临时隐藏视频窗口，否则 native 子窗口会盖住 HTML 界面；关闭面板后自动恢复。
+
+## dev 分支（基于 v0.0.1）
+
+`dev` 从标签 `v0.0.1` 拉出，用于后续开发。相对 v0.0.1 的三项改动：
+
+1. **画面就在当前窗口里显示**。默认模式由 `owned`（覆盖模式，视频窗口仍是独立顶层窗口，用户会看到「又开了一个新窗口」）改为 `child`：视频 HWND 通过 `SetParent` 真正变成 Electron 主窗口的子窗口。旧的 `owned` / `detached` 仅保留作排查对照。已存在的 v0.0.1 配置会在加载时自动迁移（`owned → child`），不需要手动改设置。
+2. **投屏时切换舞台背景色**。设置里新增「投屏时画面背景色」（默认纯黑 `#000000`）；进入投屏状态后舞台切成该颜色，画面按原始宽高比居中并四周留边，露出的背景形成取景框，用来突出共享内容（顺带修正了把竖屏画面拉伸填满横屏窗口的问题）。
+3. **守住「第一次投屏就要有画面」**。见下方第四轮：窗口一出现立即嵌入、首帧保护、连续校验自动修复，并配了 22 项自动化回归测试。
 
 ## 两种引擎
 
@@ -114,7 +123,19 @@ hwnd=4916958 pid=9296 visible=false 516x1100 class=GstD3D12Hwnd title="AirPlay V
 
 Qt 引擎的视频窗口是顶层窗口，但创建后 **`visible=false`**（等首帧才显示），而旧 `windowsOfPid()` 里有 `IsWindowVisible` 硬过滤。因此前两轮调的 `SetParent` / owner / 延迟嵌入逻辑**一次都没执行到**；第二次连接时看到的画面其实是 Qt 引擎自己弹出的独立窗口，并不是应用嵌入的结果。
 
-**修复**：枚举不再因「隐藏」跳过窗口；改为按类名/标题评分识别视频窗口（`GstD3D*`、`AirPlay Video Stream` 优先于 Qt 托盘/主题观察者窗口，隐藏窗口仍参与）；`owned` / `child` / `detached` 三种模式都主动 `ShowWindow(SW_SHOW)`。日志会记录每个候选窗口的 hwnd / 类名 / 尺寸 / visible / 标题。
+**v0.0.1 的修复**：枚举不再因「隐藏」跳过窗口；改为按类名/标题评分识别视频窗口（`GstD3D*`、`AirPlay Video Stream` 优先于 Qt 托盘/主题观察者窗口，隐藏窗口仍参与）；三种模式都主动 `ShowWindow(SW_SHOW)`。日志会记录每个候选窗口的 hwnd / 类名 / 尺寸 / visible / 标题。
+
+### 第四轮（dev 分支）：当前窗口内显示 + 首次投屏保护
+
+v0.0.1 默认的 `owned` 模式不换父窗口，视频窗口仍是顶层窗口浮在应用上方——这正是用户看到的「又弹了一个新窗口」，而且第一次投屏仍可能没画面。dev 分支改成一整套保证首次出画的流程：
+
+- **立即嵌入**：删掉 1500ms 稳定期，隐藏的视频窗口一出现就在同一轮 `SetParent` 成主窗口子窗口，不给它变成独立窗口的机会。嵌入时保持隐藏，先让引擎在首帧自行显示。
+- **首帧保护**：默认留 600ms 给引擎；到点窗口仍隐藏，就主动 `ShowWindow(SW_SHOW)` + `SWP_FRAMECHANGED` + `InvalidateRect` 触发重绘。**不再需要断开重连第二次**。
+- **连续校验**：每 200ms 检查父子关系、可见性、几何尺寸；引擎若重建父子关系、把窗口藏起来或挪回原始尺寸，就地修复；横竖屏切换还会更新取景框比例。
+- **引擎换 PID 自动续盯**：`UxPlayEngine` 新增 `started` 事件，手动重启与崩溃自动重启都会重新挂窗口监视器。
+- **回归测试**：`npm run test:firstcast` 共 22 项，覆盖隐藏窗口枚举（第三轮根因）、第一次出现即嵌入、首帧保护、断开重连、父子关系修复、居中留边几何，以及真实 Win32 窗口上的 `SetParent` / 显示 / detach 集成校验。
+
+日志里会看到 `[画面] 已嵌入当前窗口（…）` 与 `[画面] 首帧保护：…`。真机复测时若仍黑屏，把 `%APPDATA%\免费投屏\engine.log` 发出来即可定位。
 
 以下是前两轮的推断，保留作排查记录：
 
@@ -134,9 +155,9 @@ Qt 引擎的视频窗口是顶层窗口，但创建后 **`visible=false`**（等
 
 ## 已验证 / 待验证
 
-已验证：环境自检 12 项全过、冒烟测试（引擎存活 + 服务注册）、Electron 应用启动无 JS 异常、窗口/托盘/配置/日志/进程守护、koffi 的 Win32 窗口枚举调用。
+已验证（dev 分支）：环境自检 12 项全过、`npm run test:firstcast` 22 项全过、冒烟测试（引擎存活 + 服务注册）、全量 JS 语法检查、渲染层元素 id 与 CSS 规则一致性、Electron 应用启动无 JS 异常（主进程日志确认 `嵌入模式 = child（当前窗口内显示）`、引擎就绪、无残留进程）。
 
-**仍需你在 iPhone 上验证**：实际投屏的画面、声音，以及视频窗口 `SetParent` 嵌入后的位置与尺寸同步。这部分必须有真实设备才能测。
+**仍需你在 iPhone 上验证**：第一次屏幕镜像是否直接在当前窗口出画面（以及不需要第二次）、背景色与居中留边的观感、声音、全屏/置顶时的位置尺寸同步。首次投屏的显示链路由自动化回归测试覆盖，但真实 D3D12 渲染必须有设备才能最终确认。
 
 ## 其他已知限制
 
@@ -152,14 +173,17 @@ Qt 引擎的视频窗口是顶层窗口，但创建后 **`visible=false`**（等
 ## 目录结构
 
 ```
-src/main/index.js       主进程：窗口、托盘、IPC、状态广播
+src/main/index.js       主进程：窗口、托盘、IPC、状态广播、视频区域计算
 src/main/uxplay.js      引擎管理、两种引擎的参数拼装、日志解析、崩溃重启
-src/main/winembed.js    koffi 调 user32.dll：按 PID 找窗口、SetParent、尺寸同步
-src/main/config.js      配置读写（userData/settings.json）
+src/main/winembed.js    koffi 调 user32.dll：按 PID 找窗口、SetParent、连续校验、尺寸同步
+src/main/embedguard.js  首次投屏保护与连续校验（可注入替身做回归测试）
+src/main/geometry.js    按宽高比居中留边的纯几何计算
+src/main/config.js      配置读写与 v0.0.1 → dev 配置迁移
 src/preload/index.js    contextBridge 白名单 API
 src/renderer/           中文界面（HTML / CSS / JS）
 scripts/start.js        启动入口（清理宿主环境变量）
 scripts/check-env.js    环境自检
+scripts/test-firstcast.js  首次投屏回归测试（22 项，无需 iPhone）
 scripts/smoke-test.js   引擎冒烟测试（含 mDNS 探测）
 scripts/prepare-runtime.ps1  下载并解压运行时
 scripts/gen_assets.py   用标准库生成托盘图标
@@ -182,8 +206,9 @@ runtime/                外部运行时（不进 git）
 | 视频输出 | d3d11videosink | Qt 引擎可用 d3d12videosink |
 | 音频输出 | wasapisink | 仅命令行引擎生效 |
 | 断开后保留窗口 | 开（`-nc`） | 避免每次重连重新嵌入 |
-| 画面嵌入模式 | owned（覆盖） | 可选 child（SetParent）/ detached（独立窗口，排查用） |
-| 画面嵌入延迟 | 1500 ms | 窗口出现后等多久再处理；首次黑屏可调大 |
+| 画面显示方式 | child（当前窗口内） | 可选 owned（独立顶层窗口）/ detached（完全不干预），两者仅供排查 |
+| 首次投屏显示保护 | 600 ms | 留给引擎自行显示首帧；到点仍隐藏则主动显示并重绘 |
+| 投屏时画面背景色 | #000000 | 画面按原比例居中，四周留边露出该背景色 |
 | 工具栏高度 / DPI 缩放 | 56 / 自动 | 画面错位时微调 |
 | 额外参数 | 空 | 追加给引擎（Qt 引擎写入 arguments.txt） |
 | 运行日志 | `%APPDATA%\免费投屏\engine.log` | 日志面板「打开日志文件」可直接打开 |

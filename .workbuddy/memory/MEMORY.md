@@ -15,7 +15,8 @@ Windows 10/11 上把 PC 变成 AirPlay 接收端，让 iPhone 屏幕镜像过来
 - 工程已落地（2026-11-14）：Electron 45.3.2 + koffi 3.3.8；主进程 IPC/托盘/状态机、UxPlay 进程守护与日志解析、Win32 SetParent 嵌入与尺寸同步、中文界面/设置/日志、自检与冒烟脚本、GPLv3 LICENSE 与 NOTICE 均完成。`npm start` 已实测可正常起窗口且无 JS 异常；`npm run check` 12 项全过。
 - `npm start` 必须走 `scripts/start.js`：宿主会话带 `ELECTRON_RUN_AS_NODE=1`，直接 `electron .` 会让 require('electron') 退化为路径字符串。
 - **CPU 兼容阻塞已解决（2026-11-14）**：用调试器抓到命令行 `uxplay.exe` 在 `+0x167c3` 执行 `shlx`（BMI2，机器码 `c4 e2 69 f7 d0`），capstone 线性反汇编统计出 455 条 AVX2/BMI 指令；本机 Xeon E5-2689 无 AVX2。两个公开预编译来源（uxplay-windows 1.72.1-3 安装包、saimanish1/UxPlay 1.72.2 portable）同样是 456 条，二进制补丁不可行。最终换用 uxplay-windows 2.0.0.1736 Qt 便携版：实测稳定存活、监听 7000/7001、手写 mDNS 查询收到完整 `_airplay._tcp` / `_raop._tcp` TXT 记录，`smoke-test.js` 稳定输出「引擎持续运行 + 已检测到服务应答」。命令行引擎保留给支持 AVX2 的机器。
-- **仍待验证**：真实 iPhone 投屏的画面、声音、`SetParent` 嵌入与尺寸同步（需用户操作设备）。虚拟网卡/多网卡环境下 mDNS 只读查询偶发收不到应答，可重启 `Bonjour Service`。
+- **dev 分支（基于 v0.0.1，2026-11-14）**：默认改为 `child` 模式，视频 HWND 真正 `SetParent` 进当前窗口，不再出现独立新窗口；`config.js` 用 `CONFIG_VERSION=2` 把旧 `owned`/1500ms 配置迁移到 `child`/600ms。投屏时舞台切成 `streamBgColor`（默认 `#000000`），画面按源宽高比居中留边（`geometry.js fitRect`），背景色作为取景框。首次投屏保护：`watch` 立即嵌入隐藏窗口 + `embedguard.js` 每 200ms 校验父子关系/可见性/几何，600ms 后仍隐藏就主动显示并重绘；引擎重启靠 `UxPlayEngine` 的 `started` 事件重挂 watcher。`npm run test:firstcast` 22 项是首次投屏黑屏的回归测试，改动显示链路后必须重跑。
+- **仍待验证**：真实 iPhone 第一次投屏是否直接在当前窗口出画面、背景色与留边观感、声音、全屏/置顶时的位置尺寸同步（需用户操作设备）。虚拟网卡/多网卡环境下 mDNS 只读查询偶发收不到应答，可重启 `Bonjour Service`。
 
 ## 范围边界
 - MVP：屏幕镜像 + 声音、全屏、置顶、托盘、简体中文界面。
